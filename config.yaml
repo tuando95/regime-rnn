@@ -1,0 +1,97 @@
+## config.yaml
+
+data:
+  synthetic:
+    num_sequences: 200
+    sequence_length: 200
+    regimes:
+      abrupt:
+        self_transition_prob: 0.9
+      gradual:
+        tau: 2
+      hierarchical:
+        num_parents: 2
+        # children per parent: sampled 2–3
+    ar_order: 3
+    ar_coeff_range: [-0.8, 0.8]
+    spectral_radius_max: 0.95
+    sigma_range: [0.01, 0.1]
+    multivariate:
+      wishart_df: d
+      max_condition_number: 10
+
+preprocessing:
+  interpolation: linear
+  normalization: zscore
+
+model:
+  budget_params: 25000000
+  experts:
+    K_options: [3, 5, 7]
+    hidden_dim_options: [64, 128, 256]
+  gating:
+    depth_options: [1, 2, 3]
+    width: null    # defaults to hidden_dim
+    dropout_options: [0.0, 0.3]
+  readout_dim: m    # output dimension
+
+# Baseline specific configurations (can be overridden)
+baselines:
+  transformer:
+    num_layers: 6 # As per paper 6x8
+    nhead: 8
+    d_model: 512 # Default, adjust based on budget/needs
+    dim_feedforward: 2048 # Default (4*d_model)
+    dropout: 0.1
+    # Note: Hidden dim determined to meet budget_params if possible
+  lstm:
+    # Hidden dim determined to meet budget_params if possible
+    hidden_dim_fallback: 64 # Fallback if budget cannot be met or not specified
+  # MonolithicRNN (GRU) would follow similar structure if added
+  markov_switching_ar:
+    max_iters: 100 # Default from code
+    tol: 1e-4 # Default from code
+
+training:
+  optimizer:
+    type: Adam
+    beta1: 0.9
+    beta2: 0.999
+  lr_schedule:
+    type: inverse_sqrt   # η_t = η0 / sqrt(1 + t / T_decay)
+    init_options: [1e-4, 1e-2]
+    decay_steps: T
+  gradient_clipping_norm: 5.0
+  weight_initialization:
+    gru: xavier_uniform
+    mlp: he_normal
+    bias: zero
+  regularization:
+    dropout: 0.1
+    lambda_l2_options: [1e-6, 1e-3]
+    lambda_entropy_options: [1e-4, 1e-2]
+  early_stopping_patience: 10
+
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+
+hyperparameter_search:
+  grid:
+    K: [3, 5, 7, 9]
+    hidden_dim: [64, 128, 256, 512]
+  random:
+    gating_layers: [1, 2, 3, 4]
+    dropout: [0.0, 0.3]
+    lambda_l2: [1e-6, 1e-3]
+    lambda_entropy: [1e-4, 1e-2]
+  bayesian:
+    learning_rate_init: [1e-4, 1e-2]
+
+seed: 42
+
+precision:
+  mixed_fp16: true
+  cudnn_deterministic: false
+  cudnn_benchmark: true
