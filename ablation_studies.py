@@ -92,7 +92,7 @@ def _run_single_ablation_trial(
             trial_config
         )
         start_time = time.time()
-        trained_model = trainer.train()
+        trained_model, _ = trainer.train()
         train_time = time.time() - start_time
         logger.info(f"Training completed in {train_time:.2f}s")
     except Exception as e:
@@ -112,6 +112,10 @@ def _run_single_ablation_trial(
          # Convert numpy array to list for JSON serialization
         if "specialization_index" in metrics and isinstance(metrics["specialization_index"], np.ndarray):
              metrics["specialization_index"] = metrics["specialization_index"].tolist()
+        
+        # Log key metrics after evaluation
+        logger.info(f"  Trial Metrics: MSE = {metrics.get('mse', 'N/A'):.6f}, "
+                    f"Regime Accuracy = {metrics.get('regime_accuracy', 'N/A')}") # Format regime accuracy if needed
     except Exception as e:
         logger.error(f"Error during evaluation: {e}", exc_info=True)
         return {"error": f"Evaluation failed: {e}"}
@@ -149,6 +153,15 @@ def run_ablation_k_vs_h(
     input_dim = X_train.shape[-1]
     output_dim = y_train.shape[-1]
 
+    # Get true number of regimes R from config
+    num_regimes_R = int(config.get("data", {})
+                              .get("synthetic", {})
+                              .get("num_regimes", 0))
+    if num_regimes_R <= 0:
+        logger.error("Could not determine num_regimes (R) from config. Aborting K vs h ablation.")
+        return {"error": "num_regimes not found in config"}
+    logger.info(f"Using true number of regimes R={num_regimes_R} for K check.")
+
     for k in k_options:
         for h in h_options:
             trial_key = f"K={k}_h={h}"
@@ -173,8 +186,27 @@ def run_ablation_k_vs_h(
                 }
             }
             
-            # Use default training params for this ablation
-            train_params = {} 
+            # Default training params - may be overridden below
+            train_params = {}
+
+            # If K < R, force lambda_regime to 0 for this trial
+            if k < num_regimes_R:
+                logger.warning(
+                    f"Running K={k} < R={num_regimes_R}, setting lambda_regime=0 for this trial."
+                )
+                # Ensure regularization dict exists
+                train_params.setdefault("regularization", {})
+                # Override lambda_regime_options
+                train_params["regularization"]["lambda_regime_options"] = [0.0]
+                # Ensure other lambdas use config defaults if not already set
+                # (Needed if base config's training.regularization is missing)
+                default_reg_cfg = config.get("training", {}).get("regularization", {})
+                train_params["regularization"].setdefault(
+                    "lambda_l2_options", default_reg_cfg.get("lambda_l2_options", [0.0])
+                )
+                train_params["regularization"].setdefault(
+                    "lambda_entropy_options", default_reg_cfg.get("lambda_entropy_options", [0.0])
+                )
             
             metrics = _run_single_ablation_trial(model_params, train_params, datasets, config)
             results[trial_key] = metrics
@@ -199,14 +231,14 @@ def run_ablation_gating(
     gating_cfg = model_cfg.get("gating", {})
 
     # Use first K/h option as base
-    k = experts_cfg.get("K_options", [5])[0]
-    h = experts_cfg.get("hidden_dim_options", [128])[0]
+    k = experts_cfg.get("K_options", [5])[-1]
+    h = experts_cfg.get("hidden_dim_options", [128])[-1]
 
     # Attention heads to test (from config)
     attention_head_options = gating_cfg.get("attention_heads_options", [4, 8])
 
     # Default dropout
-    dropout = gating_cfg.get("dropout_options", [0.1])[0]
+    dropout = gating_cfg.get("dropout_options", [0.1])[-1]
 
     # Get dims from data
     X_train, y_train, _ = datasets['train'].tensors
@@ -263,12 +295,12 @@ def run_ablation_regularization(
     gating_cfg = model_cfg.get("gating", {})
     
     # Base model params (using defaults or first option)
-    k = experts_cfg.get("K_options", [5])[0]
-    h = experts_cfg.get("hidden_dim_options", [128])[0]
+    k = experts_cfg.get("K_options", [5])[-1]
+    h = experts_cfg.get("hidden_dim_options", [128])[-1]
     # Use default attention heads
     attn_head_opts = gating_cfg.get("attention_heads_options", [4])
     attention_heads = attn_head_opts[0]
-    dropout = gating_cfg.get("dropout_options", [0.1])[0]
+    dropout = gating_cfg.get("dropout_options", [0.1])[-1]
     
     # Check divisibility for default settings
     if h % attention_heads != 0:

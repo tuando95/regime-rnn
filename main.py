@@ -17,6 +17,7 @@ import logging
 import json
 import copy
 import numpy as np
+import time
 
 import torch
 
@@ -224,8 +225,11 @@ def main():
                 {"train": datasets["train"], "val": datasets["val"]},
                 config
             )
-            trained_model = trainer.train()
-            logger.info("Training completed.")
+            logger.info("Starting training...")
+            start_time = time.time()
+            trained_model, _ = trainer.train() # Unpack the model
+            train_time = time.time() - start_time
+            logger.info(f"Training completed in {train_time:.2f} seconds.")
 
             # 12. Save checkpoint if we trained
             ckpt_path = os.path.join(log_dir, "model_checkpoint.pt")

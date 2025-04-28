@@ -312,9 +312,9 @@ class SyntheticDataGenerator:
                 if t >= p:
                     for k_lag in range(p):
                         A_k = A_list_r[k_lag]
-                        if d == 1:
+                    if d == 1:
                             ar_val += A_k * X[idx, t - 1 - k_lag]
-                        else:
+                    else:
                             # Need einsum or loop for batch matrix multiply
                             # X[idx, t - 1 - k_lag] is (batch, d)
                             # A_k is (d, d)

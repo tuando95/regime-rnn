@@ -92,8 +92,9 @@ class Trainer:
         ent_opts = reg_cfg.get("lambda_entropy_options", [1e-4])
         self.lambda_ent: float = float(ent_opts[0])
         # Add regime loss weight
-        regime_opts = reg_cfg.get("lambda_regime_options", [10.0]) # Default to 1.0 initially
-        self.lambda_regime: float = float(regime_opts[1])
+        regime_opts = reg_cfg.get("lambda_regime_options", [10.0]) # Default if missing
+        # Read the first element, which will be the sampled value during HPO
+        self.lambda_regime: float = float(regime_opts[0])
 
         # Early stopping
         self.early_stopping_patience: int = int(
@@ -207,7 +208,13 @@ class Trainer:
 
                             mse_t = self.mse_loss(y_hat, y_t)
                             ent_t = -(g_t * torch.log(g_t + utils.EPS)).sum(dim=1).mean()
-                            ce_t = self.ce_loss(logits, z_t)
+                            # ce_t = self.ce_loss(logits, z_t) # Original line
+                            # Conditionally compute CE loss only if lambda_regime > 0
+                            if self.lambda_regime > utils.EPS:
+                                ce_t = self.ce_loss(logits, z_t)
+                            else:
+                                # If lambda_regime is zero, CE loss is zero
+                                ce_t = torch.tensor(0.0, device=self.device)
 
                             sum_mse = sum_mse + mse_t
                             sum_ent = sum_ent + ent_t
@@ -252,7 +259,13 @@ class Trainer:
 
                         mse_t = self.mse_loss(y_hat, y_t)
                         ent_t = -(g_t * torch.log(g_t + utils.EPS)).sum(dim=1).mean()
-                        ce_t = self.ce_loss(logits, z_t)
+                        # ce_t = self.ce_loss(logits, z_t) # Original line
+                        # Conditionally compute CE loss only if lambda_regime > 0
+                        if self.lambda_regime > utils.EPS:
+                            ce_t = self.ce_loss(logits, z_t)
+                        else:
+                            # If lambda_regime is zero, CE loss is zero
+                            ce_t = torch.tensor(0.0, device=self.device)
 
                         sum_mse = sum_mse + mse_t
                         sum_ent = sum_ent + ent_t
@@ -277,7 +290,7 @@ class Trainer:
                     optimizer.step()
 
                     # Step LR scheduler *after* optimizer step
-                    scheduler.step()
+                scheduler.step()
 
                 # Accumulate metrics
                 train_samples += B
@@ -378,7 +391,13 @@ class Trainer:
 
                         mse_t = self.mse_loss(y_hat, y_t)
                         ent_t = -(g_t * torch.log(g_t + utils.EPS)).sum(dim=1).mean()
-                        ce_t = self.ce_loss(logits, z_t)
+                        # ce_t = self.ce_loss(logits, z_t) # Original line
+                        # Conditionally compute CE loss only if lambda_regime > 0
+                        if self.lambda_regime > utils.EPS:
+                            ce_t = self.ce_loss(logits, z_t)
+                        else:
+                            # If lambda_regime is zero, CE loss is zero
+                            ce_t = torch.tensor(0.0, device=self.device)
 
                         sum_mse = sum_mse + mse_t
                         sum_ent = sum_ent + ent_t

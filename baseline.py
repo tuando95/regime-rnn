@@ -276,7 +276,6 @@ class MonolithicLSTM(nn.Module, BaselineModel):
             )
 
     def train_model(self, datasets: Dict[str, TensorDataset]) -> None:
-        # identical to MonolithicRNN training but with LSTM
         cfg = utils._CONFIG.get("training", {})
         lr0 = float(utils._CONFIG.get("training", {})
                               .get("lr_schedule", {})
@@ -285,6 +284,7 @@ class MonolithicLSTM(nn.Module, BaselineModel):
                                  .get("lambda_l2_options", [1e-6])[0])
         clip_norm = float(cfg.get("gradient_clipping_norm", 5.0))
         patience = int(cfg.get("early_stopping_patience", 10))
+        max_epochs = int(cfg.get("max_epochs", 100))
         batch_size = int(self.params.get("batch_size", 32))
         train_ds = datasets["train"]
         val_ds = datasets["val"]
@@ -308,7 +308,7 @@ class MonolithicLSTM(nn.Module, BaselineModel):
         best_val = float("inf")
         epochs_no_improve = 0
         epoch = 0
-        while True:
+        while epoch < max_epochs:
             epoch += 1
             self.lstm.train()
             train_loss = 0.0
@@ -349,7 +349,7 @@ class MonolithicLSTM(nn.Module, BaselineModel):
                     count += x_in.size(0)
             val_loss /= max(count, 1)
             logger.info(
-                f"[MonolithicLSTM] Epoch {epoch} TrainLoss={train_loss:.6f} "
+                f"[MonolithicLSTM] Epoch {epoch}/{max_epochs} TrainLoss={train_loss:.6f} "
                 f"ValLoss={val_loss:.6f}"
             )
             if val_loss < best_val - 1e-8:
@@ -366,6 +366,9 @@ class MonolithicLSTM(nn.Module, BaselineModel):
                         f"[MonolithicLSTM] Early stopping at epoch {epoch}"
                     )
                     break
+        if epoch >= max_epochs:
+            logger.info(f"[MonolithicLSTM] Reached max_epochs ({max_epochs}) without early stopping.")
+            
         self.lstm.load_state_dict(best_state['lstm'])
         self.readout.load_state_dict(best_state['readout'])
 
@@ -470,6 +473,7 @@ class TransformerModel(nn.Module, BaselineModel):
                                  .get("lambda_l2_options", [1e-6])[0])
         clip_norm = float(cfg.get("gradient_clipping_norm", 5.0))
         patience = int(cfg.get("early_stopping_patience", 10))
+        max_epochs = int(cfg.get("max_epochs", 100))
         batch_size = int(self.params.get("batch_size", 32))
         train_ds = datasets["train"]
         val_ds = datasets["val"]
@@ -496,7 +500,7 @@ class TransformerModel(nn.Module, BaselineModel):
         best_val = float("inf")
         epochs_no_improve = 0
         epoch = 0
-        while True:
+        while epoch < max_epochs:
             epoch += 1
             # Train
             self.embedding.train()
@@ -560,7 +564,7 @@ class TransformerModel(nn.Module, BaselineModel):
                     count += x_in.size(0)
             val_loss /= max(count, 1)
             logger.info(
-                f"[Transformer] Epoch {epoch} TrainLoss={train_loss:.6f} "
+                f"[Transformer] Epoch {epoch}/{max_epochs} TrainLoss={train_loss:.6f} "
                 f"ValLoss={val_loss:.6f}"
             )
             if val_loss < best_val - 1e-8:
@@ -579,6 +583,9 @@ class TransformerModel(nn.Module, BaselineModel):
                         f"[Transformer] Early stopping at epoch {epoch}"
                     )
                     break
+        if epoch >= max_epochs:
+            logger.info(f"[Transformer] Reached max_epochs ({max_epochs}) without early stopping.")
+            
         # load best
         self.embedding.load_state_dict(best_state['emb'])
         self.pos_enc.load_state_dict(best_state['pos'])
@@ -798,7 +805,7 @@ class MarkovSwitchingAR(BaselineModel):
             x: Tensor (B, T, d)  -- here d must match training
         Returns:
             Tuple[torch.Tensor, np.ndarray]: 
-                y_pred: Tensor (B, T, d)
+            y_pred: Tensor (B, T, d)
                 gamma_all: Numpy array (B, T, R) of regime probabilities
         """
         X_np = x.cpu().numpy()

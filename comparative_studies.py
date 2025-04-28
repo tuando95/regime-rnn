@@ -129,9 +129,11 @@ def run_comparative_analysis(
     try:
         model = ModularRegimeRNN(mod_rnn_params).to(device)
         trainer = Trainer(model, {"train": datasets["train"], "val": datasets["val"]}, config)
+        logger.info("Starting training...")
         start_time = time.time()
-        trained_model, _ = trainer.train()
+        trained_model, _ = trainer.train()  # Unpack the model from the tuple
         train_time = time.time() - start_time
+        logger.info(f"Training completed in {train_time:.2f} seconds.")
         
         evaluator = Evaluator(trained_model, {"test": datasets["test"]}, config)
         metrics = evaluator.evaluate()

@@ -74,13 +74,15 @@ class HyperparameterSearch:
         if "train" not in self.datasets or "val" not in self.datasets:
             raise ValueError("Config must include 'datasets' with keys 'train' and 'val'")
 
-        # Initialize Optuna study
+        # Initialize Optuna study - Now maximizing regime accuracy
         sampler = TPESampler(seed=int(self.config.get("seed", 42)))
         pruner = MedianPruner()
         self.study = optuna.create_study(
-            direction="minimize", sampler=sampler, pruner=pruner
+            direction="maximize",
+            sampler=sampler,
+            pruner=pruner
         )
-        logger.info("Optuna study created for hyperparameter search")
+        logger.info("Optuna study created to MAXIMIZE validation regime accuracy")
 
     def run(self) -> Dict[str, Any]:
         """
@@ -101,7 +103,7 @@ class HyperparameterSearch:
 
         best = self.study.best_trial
         logger.info(
-            f"Best trial #{best.number} — val_mse={best.value:.6f}, params={best.params}"
+            f"Best trial #{best.number} — val_regime_accuracy={best.value:.4f}, params={best.params}"
         )
 
         # Retrieve the saved model_params or rebuild if missing
@@ -114,17 +116,8 @@ class HyperparameterSearch:
 
     def _objective(self, trial: optuna.Trial) -> float:
         """
-        Objective function for a single trial: sample hyperparameters,
-        train a ModularRegimeRNN, evaluate on validation set, return MSE.
-        Now uses attention gating.
-
-        Args:
-            trial: Optuna trial object.
-
-        Returns:
-            Validation MSE (lower is better).
-        Raises:
-            TrialPruned: to indicate that the trial should be pruned.
+        Objective function: sample hyperparameters, train, evaluate,
+        return VALIDATION REGIME ACCURACY (higher is better).
         """
         try:
             # 1) Sample hyperparameters
@@ -164,7 +157,7 @@ class HyperparameterSearch:
                 low=float(self.random_space["lambda_regime"][0]),
                 high=float(self.random_space["lambda_regime"][1]),
                 log=False
-            ) # Use log=False or suggest_categorical if discrete steps are better
+            )
             
             learning_rate_init = trial.suggest_float(
                 "learning_rate_init",
@@ -207,10 +200,9 @@ class HyperparameterSearch:
             reg_cfg = cfg_trial.setdefault("training", {}).setdefault("regularization", {})
             reg_cfg["lambda_l2_options"] = [lambda_l2]
             reg_cfg["lambda_entropy_options"] = [lambda_entropy]
-            reg_cfg["lambda_regime_options"] = [lambda_regime] # Use sampled regime weight
+            reg_cfg["lambda_regime_options"] = [lambda_regime]
 
             # 6) Train the model
-            # (Trainer needs to be updated to handle list hidden state and 4 returns)
             trainer = Trainer(
                 model,
                 {"train": self.datasets["train"], "val": self.datasets["val"]},
@@ -221,35 +213,34 @@ class HyperparameterSearch:
             trial.set_user_attr("final_epoch", final_epoch)
 
             # 7) Evaluate on validation set
-            # (Evaluator needs to be updated for list hidden state and 4 returns)
             evaluator = Evaluator(
                 trained_model,
                 {"test": self.datasets["val"]}, # Evaluate on VAL set for HPO
                 cfg_trial # Use trial config in case evaluator needs settings?
             )
             metrics = evaluator.evaluate()
-            # Objective: Use total validation loss (includes weighted CE)
-            # Make sure Trainer._validate returns it or calculate here
-            # Assuming evaluator.evaluate doesn't give total loss, let's just use MSE for now
-            # TODO: Ideally optimize based on val_loss or weighted combo of mse/regime_acc
-            objective_value = float(metrics.get("mse", float("inf"))) 
+            
+            # Get regime accuracy from metrics
+            val_regime_accuracy = float(metrics.get("regime_accuracy", 0.0)) # Default to 0 if missing
+            objective_value = val_regime_accuracy # The value to maximize
+            
+            # Store other metrics for reference
             trial.set_user_attr("val_mse", metrics.get("mse"))
-            trial.set_user_attr("val_regime_accuracy", metrics.get("regime_accuracy"))
+            trial.set_user_attr("val_regime_accuracy", val_regime_accuracy)
 
-            # 8) Report and possibly prune based on the objective value
-            trial.report(objective_value, step=final_epoch) # Report at final epoch
+            # 8) Report objective value (validation accuracy) for pruning
+            trial.report(objective_value, step=final_epoch)
             if trial.should_prune():
                 raise TrialPruned()
 
             return objective_value
 
         except TrialPruned:
-            # Re‐raise to tell Optuna this trial is pruned
             raise
         except Exception as exc:
-            # Unhandled exception: prune this trial
             logger.exception(f"Trial {trial.number} failed with exception: {exc}")
-            trial.report(float("inf"), step=0)
+            # Report a very bad value (e.g., 0.0) if the objective is accuracy maximization
+            trial.report(0.0, step=0)
             raise TrialPruned() from exc
 
     def _objective_with_pbar(self, trial: optuna.Trial, pbar: tqdm.tqdm) -> float:
@@ -257,24 +248,27 @@ class HyperparameterSearch:
         final_epoch_str = ""
         try:
             result = self._objective(trial)
-            # Update progress bar upon successful completion or pruning
             pbar.update(1)
-            # Add best value so far to pbar description
             postfix_dict = {}
-            if self.study.best_value is not None:
-                postfix_dict["best_mse"] = f"{self.study.best_value:.4f}"
-            # Get final epoch from trial attributes if available
+            try:
+                # Display best accuracy found so far
+                if self.study.best_value is not None:
+                    postfix_dict["best_reg_acc"] = f"{self.study.best_value:.4f}"
+            except ValueError:
+                pass
             final_epoch = trial.user_attrs.get("final_epoch")
             if final_epoch is not None:
                 postfix_dict["last_epoch"] = final_epoch
+            # Add current trial accuracy to postfix for immediate feedback
+            current_acc = trial.user_attrs.get("val_regime_accuracy")
+            if current_acc is not None:
+                postfix_dict["curr_acc"] = f"{current_acc:.4f}"
             pbar.set_postfix(postfix_dict)
             return result
         except TrialPruned as e:
-            # Update progress bar if trial is pruned
             pbar.update(1)
             raise e # Re-raise TrialPruned
         except Exception as e: 
-            # Also update progress bar if trial fails
             pbar.update(1)
             # Log failure
             pbar.set_postfix({"status": "failed"})

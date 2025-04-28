@@ -36,11 +36,11 @@ preprocessing:
 model:
   budget_params: 25000000
   experts:
-    K_options: [3, 5, 7]
-    hidden_dim_options: [64, 128, 256, 512]
+    K_options: [3, 7, 9, 11, 5]
+    hidden_dim_options: [64, 512, 256, 128]
   gating:
-    attention_heads_options: [4, 8, 16]
-    dropout_options: [0.0, 0.3]
+    attention_heads_options: [4, 8, 16, 32]
+    dropout_options: [0.0, 0.3, 0.15]
   readout_dim: m    # output dimension
 
 # Baseline specific configurations (can be overridden)
@@ -78,7 +78,7 @@ training:
     dropout: 0.1
     lambda_l2_options: [1e-6, 1e-3]
     lambda_entropy_options: [1e-4, 1e-2]
-    lambda_regime_options: [0.1, 1.0, 10.0]
+    lambda_regime_options: [1.0, 5.0, 10.0]
   early_stopping_patience: 30
   max_epochs: 150
 
