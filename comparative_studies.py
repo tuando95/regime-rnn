@@ -146,11 +146,12 @@ def run_comparative_analysis(
         with torch.no_grad():
              for x_batch, _, _ in test_loader:
                  x_seq = x_batch[0].to(device)
-                 h_prev = trained_model.init_hidden(1, device=device)
+                 # Initialize hidden state (returns list)
+                 h_prev = trained_model.init_hidden(1, device=device) # h_prev is List[Tensor]
                  seq_preds = []
                  for t in range(x_seq.size(0)):
-                      # Correctly update h_prev with the output from the previous step
-                      h_prev, y_hat, _ = trained_model(x_seq[t].unsqueeze(0), h_prev)
+                      # Unpack 4 values, ignore g_t and logits
+                      h_prev, y_hat, _, _ = trained_model(x_seq[t].unsqueeze(0), h_prev)
                       seq_preds.append(y_hat.cpu().numpy())
                  y_preds_modrnn.append(np.vstack(seq_preds))
         y_pred_modrnn_flat = np.concatenate(y_preds_modrnn, axis=0)

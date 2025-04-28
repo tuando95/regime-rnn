@@ -2,23 +2,32 @@
 
 data:
   synthetic:
-    num_sequences: 200
+    num_sequences: 2000
     sequence_length: 200
+    num_regimes: 3
     regimes:
       abrupt:
-        self_transition_prob: 0.9
+        self_transition_prob: 0.92
       gradual:
-        tau: 2
+        tau: 3
       hierarchical:
         num_parents: 2
         # children per parent: sampled 2–3
     ar_order: 3
-    ar_coeff_range: [-0.8, 0.8]
-    spectral_radius_max: 0.95
-    sigma_range: [0.01, 0.1]
+    ar_coeff_range:
+      regime1: [-1.5, -0.5]
+      regime2: [-0.2, 0.2]
+      regime3: [0.5, 1.5]
+    spectral_radius_max: 0.9
+    sigma_range: [0.05, 0.25]
+    regime_frequencies:
+      regime1: [0.05, 0.1]
+      regime2: [0.2, 0.3]
+      regime3: [0.4, 0.6]
+    oscillation_amplitude_range: [0.05, 0.15]
     multivariate:
       wishart_df: d
-      max_condition_number: 10
+      max_condition_number: 8
 
 preprocessing:
   interpolation: linear
@@ -28,10 +37,9 @@ model:
   budget_params: 25000000
   experts:
     K_options: [3, 5, 7]
-    hidden_dim_options: [64, 128, 256]
+    hidden_dim_options: [64, 128, 256, 512]
   gating:
-    depth_options: [1, 2, 3]
-    width: null    # defaults to hidden_dim
+    attention_heads_options: [4, 8, 12]
     dropout_options: [0.0, 0.3]
   readout_dim: m    # output dimension
 
@@ -70,6 +78,7 @@ training:
     dropout: 0.1
     lambda_l2_options: [1e-6, 1e-3]
     lambda_entropy_options: [1e-4, 1e-2]
+    lambda_regime_options: [0.1, 1.0, 10.0]
   early_stopping_patience: 10
 
 split:
@@ -79,13 +88,14 @@ split:
 
 hyperparameter_search:
   grid:
-    K: [3, 5, 7, 9]
-    hidden_dim: [64, 128, 256, 512]
+    K: [3, 5, 7]
+    hidden_dim: [64, 128, 256]
   random:
-    gating_layers: [1, 2, 3, 4]
+    attention_heads: [4, 8]
     dropout: [0.0, 0.3]
     lambda_l2: [1e-6, 1e-3]
     lambda_entropy: [1e-4, 1e-2]
+    lambda_regime: [0.1, 1.0, 10.0]
   bayesian:
     learning_rate_init: [1e-4, 1e-2]
 

@@ -131,7 +131,7 @@ def main():
 
     # 6. Prepare datasets
     logger.info("Preparing train/val/test splits and preprocessing...")
-    split_cfg = config.get("split", {"train": 0.8, "val": 0.1, "test": 0.1})
+    split_cfg = config.get("split", {"train": 0.6, "val": 0.2, "test": 0.2})
     loader = DatasetLoader((X, y, regimes), split_cfg)
     datasets = loader.load()
     logger.info(
@@ -169,28 +169,27 @@ def main():
         X_train, y_train, _ = datasets["train"].tensors
         input_dim = int(X_train.shape[-1])
         output_dim = int(y_train.shape[-1])
-        # Experts defaults
+        # Experts defaults (using first option)
         experts_cfg = config.get("model", {}).get("experts", {})
         K_opts = experts_cfg.get("K_options", [1])
         hidden_opts = experts_cfg.get("hidden_dim_options", [input_dim])
-        K = int(K_opts[1])
-        hidden_dim = int(hidden_opts[-1])
-        # Gating defaults
+        K = int(K_opts[-1]) # Use first option
+        hidden_dim = int(hidden_opts[-1]) # Use first option
+        # Gating defaults (Attention mechanism - using first option)
         gating_cfg = config.get("model", {}).get("gating", {})
-        depth_opts = gating_cfg.get("depth_options", [1])
+        attn_head_opts = gating_cfg.get("attention_heads_options", [4]) # Default to 4 heads if missing
         dropout_opts = gating_cfg.get("dropout_options", [0.0])
-        depth = int(depth_opts[-1])
-        dropout = float(dropout_opts[-1])
-        width_cfg = gating_cfg.get("width", None)
-        gating_width = int(width_cfg) if isinstance(width_cfg, int) else hidden_dim
+        attention_heads = int(attn_head_opts[-1]) # Use first option
+        dropout = float(dropout_opts[-1]) # Use first option
 
+        # Construct parameters for Attention Gating model
         model_params = {
             "input_dim": input_dim,
             "output_dim": output_dim,
             "experts": {"K": K, "hidden_dim": hidden_dim},
-            "gating": {"depth": depth, "width": gating_width, "dropout": dropout}
+            "gating": {"attention_heads": attention_heads, "dropout": dropout}
         }
-        logger.info(f"Default model params:\n{model_params}")
+        logger.info(f"Default model params (Attention Gate):\n{model_params}")
 
     # 10. Instantiate model (needed for studies base case)
     logger.info("Initializing base ModularRegimeRNN model configuration...")

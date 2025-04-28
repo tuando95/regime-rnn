@@ -5,7 +5,7 @@ Defines the abstract Model base class and the ModularRegimeRNN model
 with K expert GRU modules and a lightweight gating MLP.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -86,26 +86,22 @@ class ModularRegimeRNN(Model):
 
     def __init__(self, params: Dict[str, Any]) -> None:
         """
-        Initialize the ModularRegimeRNN.
+        Initialize the ModularRegimeRNN with Attention Gating.
 
         Args:
             params: Configuration dictionary containing:
                 - input_dim (int): Dimension of x_t.
                 - output_dim (int): Dimension of y_hat_t.
-                - experts (dict): {
-                      'K': int, number of experts,
-                      'hidden_dim': int, GRU hidden size
-                  }
+                - experts (dict): { 'K': int, 'hidden_dim': int }
                 - gating (dict): {
-                      'depth': int, number of MLP layers,
-                      'width': Optional[int], hidden width (defaults to hidden_dim),
-                      'dropout': float, dropout probability
+                      'attention_heads': int, # Num heads for MultiheadAttention
+                      'dropout': float
                   }
         """
         super().__init__(params)
 
         # Parse core dimensions
-        input_dim = int(params.get("input_dim", 0))
+        self.input_dim = int(params.get("input_dim", 0))
         output_dim = int(params.get("output_dim", 0))
         experts_cfg = params.get("experts", {})
         gating_cfg = params.get("gating", {})
@@ -115,22 +111,19 @@ class ModularRegimeRNN(Model):
         self.hidden_dim = int(experts_cfg.get("hidden_dim", 1))
 
         # Gating settings
-        self.gating_depth = int(gating_cfg.get("depth", 1))
-        width_opt = gating_cfg.get("width", None)
-        # Default gating width to hidden_dim if not set
-        self.gating_width = (int(width_opt)
-                             if isinstance(width_opt, int) and width_opt > 0
-                             else self.hidden_dim)
+        self.attention_heads = int(gating_cfg.get("attention_heads", 4))
         self.gating_dropout_p = float(gating_cfg.get("dropout", 0.0))
 
+        # Ensure hidden_dim is divisible by number of heads for MultiheadAttention
+        if self.hidden_dim % self.attention_heads != 0:
+            raise ValueError(
+                f"Expert hidden_dim ({self.hidden_dim}) must be divisible by "
+                f"attention_heads ({self.attention_heads})"
+            )
+
         # Build experts and gating
-        self._build_experts(input_dim, self.hidden_dim, self.K)
-        self._build_gating(input_dim,
-                           num_experts=self.K,
-                           hidden_dim=self.hidden_dim,
-                           depth=self.gating_depth,
-                           width=self.gating_width,
-                           dropout_p=self.gating_dropout_p)
+        self._build_experts(self.input_dim, self.hidden_dim, self.K)
+        self._build_gating(self.input_dim, self.hidden_dim, self.K, self.attention_heads, self.gating_dropout_p)
 
         # Readout layer
         self.readout = nn.Linear(self.hidden_dim, output_dim)
@@ -138,10 +131,7 @@ class ModularRegimeRNN(Model):
         # Initialize weights
         self._init_weights()
 
-    def _build_experts(self,
-                       input_dim: int,
-                       hidden_dim: int,
-                       num_experts: int) -> None:
+    def _build_experts(self, input_dim: int, hidden_dim: int, num_experts: int) -> None:
         """
         Construct expert GRUCell modules.
 
@@ -156,101 +146,93 @@ class ModularRegimeRNN(Model):
         ]
         self.experts = nn.ModuleList(experts)
 
-    def _build_gating(self,
-                      input_dim: int,
-                      num_experts: int,
-                      hidden_dim: int,
-                      depth: int,
-                      width: int,
-                      dropout_p: float) -> None:
+    def _build_gating(self, input_dim: int, hidden_dim: int, num_experts: int, num_heads: int, dropout_p: float) -> None:
         """
-        Construct the gating MLP network.
-
-        Args:
-            input_dim: Dimension of x_t.
-            num_experts: Number of experts K.
-            hidden_dim: Hidden dimension of each expert.
-            depth: Number of MLP layers.
-            width: Width of hidden layers.
-            dropout_p: Dropout probability.
+        Construct the attention-based gating mechanism.
+        Uses x_t to generate query, h_expert_new as keys/values.
         """
-        in_features = num_experts * hidden_dim + input_dim
-        layers: List[nn.Module] = []
+        # Linear layer to transform input x_t into a query vector of hidden_dim
+        self.query_proj = nn.Linear(input_dim, hidden_dim)
 
-        if depth == 1:
-            # Single-layer gating: apply weight_norm
-            ln = nn.Linear(in_features, num_experts)
-            layers.append(weight_norm(ln))
-            self.gating_layers = nn.ModuleList(layers)
-            self.gating_output = None
-        else:
-            # Hidden MLP layers with weight_norm
-            first = nn.Linear(in_features, width)
-            layers.append(weight_norm(first))
-            for _ in range(depth - 1):
-                lin = nn.Linear(width, width)
-                layers.append(weight_norm(lin))
-            self.gating_layers = nn.ModuleList(layers)
-            # Final projection to K logits with weight_norm
-            self.gating_output = weight_norm(nn.Linear(width, num_experts))
+        # Multi-head Attention layer
+        # embed_dim = hidden_dim (operating on expert states)
+        # kdim, vdim defaults to embed_dim
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim, num_heads=num_heads, dropout=dropout_p, batch_first=True
+        )
+        # LayerNorm after attention
+        self.attention_ln = nn.LayerNorm(hidden_dim)
 
-        self.gating_dropout = nn.Dropout(p=dropout_p)
+        # Final linear layer to project attention output context to K logits
+        self.gating_output = nn.Linear(hidden_dim, num_experts)
+
+        # Separate dropout for the final layer? Maybe not needed if attention has it.
+        # self.gating_dropout = nn.Dropout(p=dropout_p) # Re-using attention dropout for now
 
     def forward(self,
                 x_t: Tensor,
-                h_prev: List[Tensor]) -> Any:
+                h_expert_prev: List[Tensor] # Only expert states needed now
+               ) -> Tuple[List[Tensor], Tensor, Tensor, Tensor]: # Back to 4 return values
         """
-        Forward pass for one time step.
+        Forward pass for one time step using attention gating.
 
         Args:
             x_t: Input tensor of shape (batch_size, input_dim).
-            h_prev: List of K hidden-state tensors, each
-                    of shape (batch_size, hidden_dim).
+            h_expert_prev: List of K expert hidden-state tensors (batch_size, hidden_dim).
 
         Returns:
-            h_new: List of K updated hidden states.
-            y_hat: Tensor of shape (batch_size, output_dim).
+            h_expert_new: List of K updated expert hidden states.
+            y_hat: Prediction tensor of shape (batch_size, output_dim).
             g_t: Gating probabilities tensor of shape (batch_size, K).
+            logits: Gating logits tensor of shape (batch_size, K).
         """
         # 1) Expert updates
-        h_new: List[Tensor] = []
+        h_expert_new: List[Tensor] = []
         for k, expert in enumerate(self.experts):
-            h_k = expert(x_t, h_prev[k])
-            h_new.append(h_k)
+            h_k = expert(x_t, h_expert_prev[k])
+            h_expert_new.append(h_k)
 
-        # 2) Gating MLP
-        gating_input = torch.cat(h_new + [x_t], dim=1)
-        out = gating_input
-        if self.gating_output is not None:
-            # Multiple-layer MLP
-            for layer in self.gating_layers:
-                out = F.relu(layer(out))
-                out = self.gating_dropout(out)
-            logits = self.gating_output(out)
-        else:
-            # Single-layer gating: apply layer, dropout
-            out = self.gating_layers[0](out)
-            out = self.gating_dropout(out)
-            logits = out
+        # 2) Attention Gating
+        # Project x_t to query vector (batch_size, 1, hidden_dim)
+        # Note: MHA expects sequence dimension, so unsqueeze
+        query = self.query_proj(x_t).unsqueeze(1)
+
+        # Stack expert states to form Key and Value sequence (batch_size, K, hidden_dim)
+        expert_states_stacked = torch.stack(h_expert_new, dim=1)
+        keys = expert_states_stacked
+        values = expert_states_stacked
+
+        # Apply multi-head attention
+        # attn_output: (batch_size, 1, hidden_dim) - context vector based on query
+        # attn_weights: (batch_size, 1, K) - alignment scores (optional)
+        attn_output, _ = self.attention(query=query, key=keys, value=values, need_weights=False)
+
+        # Squeeze sequence dimension, apply LayerNorm
+        # Residual connection? Maybe add query + attn_output before LN
+        attn_output_squeezed = attn_output.squeeze(1)
+        context_vector = self.attention_ln(query.squeeze(1) + attn_output_squeezed) # Added residual connection
+
+        # Compute logits from the attention context vector
+        logits = self.gating_output(context_vector)
+        # Compute probabilities
         g_t = F.softmax(logits, dim=-1)
 
-        # 3) Mixture of expert states
-        # Stack: (batch_size, K, hidden_dim)
-        H = torch.stack(h_new, dim=1)
-        # Weighted sum: (batch_size, hidden_dim)
-        mixed_h = torch.sum(g_t.unsqueeze(-1) * H, dim=1)
+        # 3) Mixture of expert states using g_t
+        mixed_h = torch.sum(g_t.unsqueeze(-1) * expert_states_stacked, dim=1)
 
         # 4) Readout to predictions
         y_hat = self.readout(mixed_h)
 
-        return h_new, y_hat, g_t
+        # Return new expert states, prediction, gating probs, gating logits
+        # Note: No separate gate state to return
+        return h_expert_new, y_hat, g_t, logits
 
     def _init_weights(self) -> None:
         """
         Initialize module weights:
           - GRUCell weights: Xavier uniform, biases to zero.
-          - Linear weights (MLP + readout): Kaiming normal, biases to zero.
-          - LayerNorm left at default (weight=1, bias=0).
+          - Linear weights (readout + gating output): Kaiming normal, biases zero.
+          - LayerNorm left at default.
         """
         for module in self.modules():
             if isinstance(module, nn.GRUCell):
@@ -261,28 +243,25 @@ class ModularRegimeRNN(Model):
                 if module.bias_hh is not None:
                     nn.init.zeros_(module.bias_hh)
             elif isinstance(module, nn.Linear):
+                # Kaiming normal is okay for query_proj, readout, gating_output
                 nn.init.kaiming_normal_(module.weight, nonlinearity="relu")
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+            # MultiheadAttention weights are initialized reasonably by default
+            # LayerNorm weights/biases default to 1/0
 
-    def init_hidden(self,
-                    batch_size: int,
-                    device: Optional[torch.device] = None) -> List[Tensor]:
+    def init_hidden(self, batch_size: int, device: Optional[torch.device] = None) -> List[Tensor]:
         """
-        Create initial zero hidden states for all expert modules.
-
-        Args:
-            batch_size: Number of sequences in batch.
-            device: Torch device for the tensors; if None, inferred
-                    from module parameters.
+        Create initial zero hidden states for experts only.
 
         Returns:
-            List of K zero tensors of shape (batch_size, hidden_dim).
+            List of K zero tensors for experts (batch_size, hidden_dim).
         """
         if device is None:
-            # Infer device from parameters
             device = next(self.parameters()).device
-        return [
+        # Only expert states now
+        expert_hidden_states = [
             torch.zeros(batch_size, self.hidden_dim, device=device)
             for _ in range(self.K)
         ]
+        return expert_hidden_states

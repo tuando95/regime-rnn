@@ -12,7 +12,7 @@ Interface:
 """
 
 import math
-from typing import Tuple, Dict, List, Any
+from typing import Tuple, Dict, List, Any, Union, Optional
 
 import numpy as np
 
@@ -75,8 +75,19 @@ class SyntheticDataGenerator:
 
         # AR process configuration
         self.p: int = int(cfg.get("ar_order", 1))
-        a_min, a_max = cfg.get("ar_coeff_range", [-0.8, 0.8])
-        self.ar_coeff_range: Tuple[float, float] = (float(a_min), float(a_max))
+        # Handle new dict format for ar_coeff_range
+        ar_coeffs_cfg = cfg.get("ar_coeff_range", [-0.8, 0.8])
+        if isinstance(ar_coeffs_cfg, dict):
+            self.ar_coeff_range_dict: Optional[Dict[str, List[float]]] = ar_coeffs_cfg
+            self.ar_coeff_range: Optional[Tuple[float, float]] = None
+            # Validate dict keys match expected number of regimes (R determined later if hierarchical)
+            # We'll validate inside generate_ar_coeffs after R is finalized
+        elif isinstance(ar_coeffs_cfg, list) and len(ar_coeffs_cfg) == 2:
+            a_min, a_max = ar_coeffs_cfg
+            self.ar_coeff_range = (float(a_min), float(a_max))
+            self.ar_coeff_range_dict = None
+        else:
+            raise ValueError("Invalid format for ar_coeff_range")
         self.spectral_radius_max: float = float(cfg.get("spectral_radius_max", 0.95))
 
         # Noise configuration
@@ -88,6 +99,29 @@ class SyntheticDataGenerator:
         self.wishart_df: int = mv_cfg.get("wishart_df", self.d)
         self.max_cond: float = mv_cfg.get("max_condition_number", None)
 
+        # Regime-specific Frequencies (New)
+        self.regime_frequencies: Optional[Dict[str, List[float]]] = cfg.get("regime_frequencies", None)
+        # Regime-specific Oscillation Amplitude (New)
+        self.oscillation_amplitude_range: List[float] = cfg.get("oscillation_amplitude_range", [0.05, 0.15])
+
+        # --- Ensure R is set before validating dicts ---
+        # Initial validation if not hierarchical (R won't change)
+        if self.regime_type != "hierarchical":
+            self._validate_regime_specific_configs()
+
+    def _validate_regime_specific_configs(self):
+        """Validate regime-specific dicts after R is finalized."""
+        if self.ar_coeff_range_dict is not None:
+            expected_keys = {f"regime{r+1}" for r in range(self.R)}
+            if set(self.ar_coeff_range_dict.keys()) != expected_keys:
+                raise ValueError(f"ar_coeff_range dict keys {list(self.ar_coeff_range_dict.keys())} "
+                                 f"do not match expected keys {list(expected_keys)} for R={self.R}")
+        if self.regime_frequencies is not None:
+            expected_keys = {f"regime{r+1}" for r in range(self.R)}
+            if set(self.regime_frequencies.keys()) != expected_keys:
+                 raise ValueError(f"regime_frequencies dict keys {list(self.regime_frequencies.keys())} "
+                                 f"do not match expected keys {list(expected_keys)} for R={self.R}")
+
     def generate(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Generate synthetic dataset.
@@ -98,6 +132,8 @@ class SyntheticDataGenerator:
             regimes: np.ndarray of shape (N, T), dtype int -- regime indices [0..R-1].
         """
         regimes = self.generate_regime_chain()
+        # Final validation of regime-specific configs now that R is set
+        self._validate_regime_specific_configs()
         ar_params = self.generate_ar_coeffs()
         X, y = self.generate_emissions(regimes, ar_params)
         # Create one-step-ahead targets: y_t = x_{t+1}; last step has no future, fill zeros
@@ -186,19 +222,24 @@ class SyntheticDataGenerator:
         noise_cov: Dict[int, Any] = {}
 
         for r in range(self.R):
-            # sample raw A_i
+            # Determine the AR coefficient range for this regime
+            if self.ar_coeff_range_dict:
+                regime_key = f"regime{r+1}" # Assumes keys like "regime1", "regime2", ...
+                current_ar_range = self.ar_coeff_range_dict[regime_key]
+            else:
+                current_ar_range = self.ar_coeff_range # Use single range
+            
+            coeff_min, coeff_max = current_ar_range
+
+            # sample raw A_i using the specific range
             A_list: List[Any] = []
             for _ in range(self.p):
                 if self.d == 1:
-                    a = self.rng.uniform(
-                        self.ar_coeff_range[0], self.ar_coeff_range[1]
-                    )
+                    a = self.rng.uniform(coeff_min, coeff_max)
                     A_list.append(float(a))
                 else:
                     A_mat = self.rng.uniform(
-                        self.ar_coeff_range[0],
-                        self.ar_coeff_range[1],
-                        size=(self.d, self.d),
+                        coeff_min, coeff_max, size=(self.d, self.d)
                     )
                     A_list.append(A_mat)
 
@@ -213,6 +254,8 @@ class SyntheticDataGenerator:
                 cov = sigma * sigma
             else:
                 cov = utils.wishart_sample(self.d, np.eye(self.d), df=self.wishart_df)
+                # Optional: Add condition number check/rescaling for covariance here
+            
             coeffs[r] = A_list
             noise_cov[r] = cov
 
@@ -239,54 +282,67 @@ class SyntheticDataGenerator:
 
         X = np.zeros((N, T, d), dtype=float)
 
+        # Pre-sample frequencies and amplitudes per sequence per regime if they exist
+        # This assumes frequencies/amplitudes are constant *within* a regime for a given sequence
+        seq_frequencies = np.zeros((N, self.R)) if self.regime_frequencies else None
+        seq_amplitudes = np.zeros((N, self.R, d))
+        if self.regime_frequencies:
+            for i in range(N):
+                for r in range(self.R):
+                    regime_key = f"regime{r+1}"
+                    f_min, f_max = self.regime_frequencies[regime_key]
+                    seq_frequencies[i, r] = self.rng.uniform(f_min, f_max)
+                    # Sample amplitude - using oscillation_amplitude_range
+                    amp_min, amp_max = self.oscillation_amplitude_range
+                    # Sample one amplitude per dimension per regime per sequence
+                    seq_amplitudes[i, r, :] = self.rng.uniform(amp_min, amp_max, size=d)
+
         for t in range(T):
-            # for each regime, process its sequences
             for r in range(self.R):
                 idx = np.where(regimes[:, t] == r)[0]
                 if idx.size == 0:
                     continue
 
+                # Get AR parameters for this regime
+                A_list_r = coeffs[r]
                 cov_r = noise_cov[r]
-                # initial steps: pure noise
-                if t < p:
-                    if d == 1:
-                        sigma = math.sqrt(cov_r)
-                        X[idx, t, 0] = self.rng.normal(
-                            loc=0.0, scale=sigma, size=idx.size
-                        )
-                    else:
-                        X[idx, t, :] = self.rng.multivariate_normal(
-                            mean=np.zeros(d), cov=cov_r, size=idx.size
-                        )
-                else:
-                    # forecast via AR
-                    if d == 1:
-                        # X[...,0] holds data
-                        forecast = np.zeros(idx.size, dtype=float)
-                        for i in range(p):
-                            Ai = coeffs[r][i]  # float
-                            x_prev = X[idx, t - 1 - i, 0]
-                            forecast += Ai * x_prev
-                        sigma = math.sqrt(cov_r)
-                        noise = self.rng.normal(
-                            loc=0.0, scale=sigma, size=idx.size
-                        )
-                        X[idx, t, 0] = forecast + noise
-                    else:
-                        forecast = np.zeros((idx.size, d), dtype=float)
-                        for i in range(p):
-                            Ai = coeffs[r][i]  # shape (d, d)
-                            x_prev = X[idx, t - 1 - i, :]  # shape (idx, d)
-                            # x_prev @ Ai^T applies A_i dot x_prev^T
-                            forecast += x_prev.dot(Ai.T)
-                        noise = self.rng.multivariate_normal(
-                            mean=np.zeros(d), cov=cov_r, size=idx.size
-                        )
-                        X[idx, t, :] = forecast + noise
 
-        # For AR data target = next-step prediction; here we output X itself
-        y = X.copy()
-        return X, y
+                # Calculate AR component
+                ar_val = np.zeros((idx.size, d))
+                if t >= p:
+                    for k_lag in range(p):
+                        A_k = A_list_r[k_lag]
+                        if d == 1:
+                            ar_val += A_k * X[idx, t - 1 - k_lag]
+                        else:
+                            # Need einsum or loop for batch matrix multiply
+                            # X[idx, t - 1 - k_lag] is (batch, d)
+                            # A_k is (d, d)
+                            # einsum: 'bd,dd->bd'
+                            ar_val += np.einsum('bd,dd->bd', X[idx, t - 1 - k_lag], A_k)
+                
+                # Sample noise
+                if d == 1:
+                    noise = self.rng.normal(0, np.sqrt(cov_r), size=(idx.size, 1))
+                else:
+                    noise = self.rng.multivariate_normal(np.zeros(d), cov_r, size=idx.size)
+
+                # Calculate Oscillation component (if configured)
+                oscillation = np.zeros((idx.size, d))
+                if self.regime_frequencies is not None:
+                    # Use pre-sampled frequencies/amplitudes for these sequences in this regime
+                    freqs = seq_frequencies[idx, r] # (batch,) -> (batch, 1)
+                    amps = seq_amplitudes[idx, r, :] # (batch, d)
+                    # Add time dimension: sin(2 * pi * freq * t)
+                    time_vec = 2 * np.pi * freqs * t 
+                    # Apply sin element-wise for each dim based on amps
+                    oscillation = amps * np.sin(time_vec[:, np.newaxis]) 
+
+                # Combine components
+                X[idx, t] = ar_val + noise + oscillation
+
+        # Targets (y) are generated after this function returns in self.generate
+        return X, X # Return X for both features and potential base for target shifting
 
     @staticmethod
     def _build_companion(A_list: List[Any], d: int) -> np.ndarray:

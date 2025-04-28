@@ -85,7 +85,6 @@ class Evaluator:
               - 'num_parameters': int, total trainable parameters.
               - 'specialization_index': np.ndarray of shape (K, R).
         """
-        # Switch to eval mode
         self.model.eval()
 
         # Containers for concatenated results
@@ -94,25 +93,22 @@ class Evaluator:
         regimes_all = []
         gating_all = []
 
-        # Disable gradient computation
         with torch.no_grad():
             for batch in self.test_loader:
                 x_batch, y_batch, regimes_batch = batch
-                # Remove batch dimension (batch_size=1)
-                x_seq = x_batch[0]            # (T, d)
-                y_seq = y_batch[0]            # (T, m)
-                regimes_seq = regimes_batch[0].cpu().numpy()  # (T,)
+                x_seq = x_batch[0]           
+                y_seq = y_batch[0]           
+                regimes_seq = regimes_batch[0].cpu().numpy()
 
-                # Move to device
                 x_seq = x_seq.to(self.device)
                 y_seq = y_seq.to(self.device)
 
-                # Initialize hidden states if available
+                # Initialize hidden states (returns list)
                 if hasattr(self.model, "init_hidden"):
                     try:
                         h_prev = self.model.init_hidden(
                             batch_size=1, device=self.device
-                        )
+                        ) # h_prev is List[Tensor]
                     except Exception:
                         h_prev = None
                 else:
@@ -122,23 +118,23 @@ class Evaluator:
                 seq_gatings = []
                 T_seq = x_seq.size(0)
 
-                # Step through time
                 for t in range(T_seq):
-                    x_t = x_seq[t].unsqueeze(0)  # (1, d)
+                    x_t = x_seq[t].unsqueeze(0) 
                     if self.use_amp:
                         with torch.cuda.amp.autocast():
                             outputs = self.model(x_t, h_prev)
                     else:
                         outputs = self.model(x_t, h_prev)
 
-                    # Expect (h_new_list, y_hat, g_t)
-                    if not (isinstance(outputs, (tuple, list)) and len(outputs) == 3):
+                    # Expect 4 return values now
+                    if not (isinstance(outputs, (tuple, list)) and len(outputs) == 4):
                         raise RuntimeError(
-                            "Model.forward must return (h_prev_list, y_hat, g_t)"
+                            "Model.forward must return (h_expert_new, y_hat, g_t, logits)"
                         )
-                    h_prev, y_hat, g_t = outputs
+                    # Unpack, assign new states back to h_prev, ignore logits
+                    h_prev, y_hat, g_t, _ = outputs 
 
-                    # Collect prediction and gating
+                    # Collect prediction and gating (g_t)
                     seq_preds.append(y_hat.detach().cpu().numpy().reshape(-1))
                     seq_gatings.append(g_t.detach().cpu().numpy().reshape(-1))
 
