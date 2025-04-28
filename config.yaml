@@ -39,7 +39,7 @@ model:
     K_options: [3, 5, 7]
     hidden_dim_options: [64, 128, 256, 512]
   gating:
-    attention_heads_options: [4, 8, 12]
+    attention_heads_options: [4, 8, 16]
     dropout_options: [0.0, 0.3]
   readout_dim: m    # output dimension
 
@@ -79,19 +79,20 @@ training:
     lambda_l2_options: [1e-6, 1e-3]
     lambda_entropy_options: [1e-4, 1e-2]
     lambda_regime_options: [0.1, 1.0, 10.0]
-  early_stopping_patience: 10
+  early_stopping_patience: 30
+  max_epochs: 150
 
 split:
-  train: 0.8
+  train: 0.7
   val: 0.1
-  test: 0.1
+  test: 0.2
 
 hyperparameter_search:
   grid:
     K: [3, 5, 7]
     hidden_dim: [64, 128, 256]
   random:
-    attention_heads: [4, 8]
+    attention_heads: [4, 8, 16]
     dropout: [0.0, 0.3]
     lambda_l2: [1e-6, 1e-3]
     lambda_entropy: [1e-4, 1e-2]

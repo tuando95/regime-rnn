@@ -126,6 +126,7 @@ def run_ablation_k_vs_h(
     Ablation Study 1: Module Count (K) vs Hidden Size (h).
     Varies K and h according to options in config['model']['experts']
     while respecting config['model']['budget_params'].
+    Uses default attention gating parameters.
     """
     logger.info("Starting Ablation Study: K vs h")
     results = {}
@@ -137,12 +138,11 @@ def run_ablation_k_vs_h(
     k_options = experts_cfg.get("K_options", [3, 5, 7])
     h_options = experts_cfg.get("hidden_dim_options", [64, 128, 256])
     
-    # Use default gating params from config if not overridden by search later
-    depth_opts = gating_cfg.get("depth_options", [1])
-    dropout_opts = gating_cfg.get("dropout_options", [0.1]) # Use paper's default if not in config
-    gating_depth = depth_opts[0]
-    gating_dropout = dropout_opts[0]
-    width_cfg = gating_cfg.get("width", None)
+    # Use default gating params (attention-based)
+    attn_head_opts = gating_cfg.get("attention_heads_options", [4]) # Default 4 heads
+    dropout_opts = gating_cfg.get("dropout_options", [0.1])
+    default_attention_heads = attn_head_opts[0]
+    default_gating_dropout = dropout_opts[0]
 
     # Get dims from data
     X_train, y_train, _ = datasets['train'].tensors
@@ -154,17 +154,22 @@ def run_ablation_k_vs_h(
             trial_key = f"K={k}_h={h}"
             logger.info(f"--- Running trial: {trial_key} ---")
             
-            # Determine gating width (defaults to h if null)
-            gating_width = int(width_cfg) if isinstance(width_cfg, int) and width_cfg > 0 else h
-            
+            # Check if hidden_dim h is divisible by default_attention_heads
+            if h % default_attention_heads != 0:
+                logger.warning(
+                    f"Skipping trial {trial_key}: hidden_dim={h} not divisible " \
+                    f"by default attention_heads={default_attention_heads}"
+                )
+                results[trial_key] = {"skipped": "incompatible_h_vs_heads"}
+                continue
+
             model_params = {
                 "input_dim": input_dim,
                 "output_dim": output_dim,
                 "experts": {"K": k, "hidden_dim": h},
                 "gating": {
-                    "depth": gating_depth,
-                    "width": gating_width,
-                    "dropout": gating_dropout
+                    "attention_heads": default_attention_heads,
+                    "dropout": default_gating_dropout
                 }
             }
             
@@ -182,52 +187,52 @@ def run_ablation_gating(
     datasets: Dict[str, torch.utils.data.TensorDataset]
 ) -> Dict[str, Any]:
     """
-    Ablation Study 2: Gating Complexity.
-    Compares different gating mechanisms: linear, MLP(1-3), [Self-Attention, 1D-CNN placeholders].
-    Uses the 'best' K and h (e.g., first option in config or from hyperparam search if available).
+    Ablation Study 2: Gating Attention Heads.
+    Compares different numbers of attention heads.
+    Uses the first K and h options from config.
     """
-    logger.info("Starting Ablation Study: Gating Complexity")
+    logger.info("Starting Ablation Study: Gating Attention Heads") # Renamed study
     results = {}
 
     model_cfg = config.get("model", {})
     experts_cfg = model_cfg.get("experts", {})
     gating_cfg = model_cfg.get("gating", {})
 
-    # Use first K/h option as base unless specified otherwise
-    k = experts_cfg.get("K_options", [5])[0] # Default K=5 if not in config
-    h = experts_cfg.get("hidden_dim_options", [128])[0] # Default h=128
+    # Use first K/h option as base
+    k = experts_cfg.get("K_options", [5])[0]
+    h = experts_cfg.get("hidden_dim_options", [128])[0]
 
-    # Gating types to test
-    # Paper mentions: linear, MLP(1–3), self-attention, 1D-CNN
-    gating_options = {
-        "linear": {"depth": 1}, 
-        "mlp_2": {"depth": 2},
-        "mlp_3": {"depth": 3},
-    }
+    # Attention heads to test (from config)
+    attention_head_options = gating_cfg.get("attention_heads_options", [4, 8])
 
-    # Default dropout and width
+    # Default dropout
     dropout = gating_cfg.get("dropout_options", [0.1])[0]
-    width_cfg = gating_cfg.get("width", None)
-    gating_width = int(width_cfg) if isinstance(width_cfg, int) and width_cfg > 0 else h
 
     # Get dims from data
     X_train, y_train, _ = datasets['train'].tensors
     input_dim = X_train.shape[-1]
     output_dim = y_train.shape[-1]
     
-    for name, gate_params in gating_options.items():
-        trial_key = f"Gating={name}"
+    for num_heads in attention_head_options:
+        trial_key = f"GatingHeads={num_heads}"
         logger.info(f"--- Running trial: {trial_key} ---")
+
+        # Check divisibility
+        if h % num_heads != 0:
+            logger.warning(
+                f"Skipping trial {trial_key}: hidden_dim={h} not divisible " \
+                f"by attention_heads={num_heads}"
+            )
+            results[trial_key] = {"skipped": "incompatible_h_vs_heads"}
+            continue
 
         model_params = {
             "input_dim": input_dim,
             "output_dim": output_dim,
             "experts": {"K": k, "hidden_dim": h},
             "gating": {
-                "depth": gate_params["depth"],
-                "width": gating_width,
+                "attention_heads": num_heads,
                 "dropout": dropout
-                # Potentially add 'type': name here if model is adapted
             }
         }
         
@@ -237,7 +242,7 @@ def run_ablation_gating(
         metrics = _run_single_ablation_trial(model_params, train_params, datasets, config)
         results[trial_key] = metrics
 
-    logger.info("Completed Ablation Study: Gating Complexity")
+    logger.info("Completed Ablation Study: Gating Attention Heads")
     return results
 
 
@@ -248,7 +253,7 @@ def run_ablation_regularization(
     """
     Ablation Study 3: Regularization (Entropy).
     Varies lambda_ent over {0, 1e-5, 1e-4}.
-    Uses the 'best' K, h, and gating (e.g., first option or from search).
+    Uses default K, h, and attention gating parameters.
     """
     logger.info("Starting Ablation Study: Regularization (lambda_ent)")
     results = {}
@@ -260,11 +265,16 @@ def run_ablation_regularization(
     # Base model params (using defaults or first option)
     k = experts_cfg.get("K_options", [5])[0]
     h = experts_cfg.get("hidden_dim_options", [128])[0]
-    depth = gating_cfg.get("depth_options", [2])[0] # Default to MLP depth 2
+    # Use default attention heads
+    attn_head_opts = gating_cfg.get("attention_heads_options", [4])
+    attention_heads = attn_head_opts[0]
     dropout = gating_cfg.get("dropout_options", [0.1])[0]
-    width_cfg = gating_cfg.get("width", None)
-    gating_width = int(width_cfg) if isinstance(width_cfg, int) and width_cfg > 0 else h
     
+    # Check divisibility for default settings
+    if h % attention_heads != 0:
+         logger.error(f"Default hidden_dim={h} not divisible by default attention_heads={attention_heads}. Cannot run regularization ablation.")
+         return {"error": "incompatible_default_h_vs_heads"}
+
     # Get dims from data
     X_train, y_train, _ = datasets['train'].tensors
     input_dim = X_train.shape[-1]
@@ -275,8 +285,7 @@ def run_ablation_regularization(
         "output_dim": output_dim,
         "experts": {"K": k, "hidden_dim": h},
         "gating": {
-            "depth": depth,
-            "width": gating_width,
+            "attention_heads": attention_heads,
             "dropout": dropout
         }
     }
@@ -291,9 +300,10 @@ def run_ablation_regularization(
         # Override training params
         train_params = {
             "regularization": {
-                 # Keep default L2 from config, override only entropy
+                 # Keep default L2 and Regime weights from config, override only entropy
                  "lambda_l2_options": config.get("training",{}).get("regularization",{}).get("lambda_l2_options", [1e-6]),
-                 "lambda_entropy_options": [l_ent] 
+                 "lambda_entropy_options": [l_ent], 
+                 "lambda_regime_options": config.get("training",{}).get("regularization",{}).get("lambda_regime_options", [1.0])
             }
         }
             
@@ -320,10 +330,10 @@ def run_all_ablations(
     logger.info(f"Saved K vs h ablation results to {k_vs_h_path}")
 
     results_gating = run_ablation_gating(config, datasets)
-    gating_path = os.path.join(output_dir, "ablation_gating_results.json")
+    gating_path = os.path.join(output_dir, "ablation_gating_heads_results.json") # Renamed file
     with open(gating_path, "w") as f:
         json.dump(results_gating, f, indent=2)
-    logger.info(f"Saved gating ablation results to {gating_path}")
+    logger.info(f"Saved gating heads ablation results to {gating_path}")
 
     results_reg = run_ablation_regularization(config, datasets)
     reg_path = os.path.join(output_dir, "ablation_regularization_results.json")
